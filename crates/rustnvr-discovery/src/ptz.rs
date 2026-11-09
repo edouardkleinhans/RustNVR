@@ -157,13 +157,16 @@ impl PtzCamera {
 
     /// The positions stored on the camera.
     pub async fn presets(&self) -> Result<Vec<Preset>, OnvifError> {
-        let body = self
-            .ptz(&format!(
-                "<tptz:GetPresets>{}</tptz:GetPresets>",
-                self.profile_token()
-            ))
-            .await?;
-        Ok(presets_of(&body))
+        let request = format!(
+            "<tptz:GetPresets>{}</tptz:GetPresets>",
+            self.profile_token()
+        );
+        match self.ptz(&request).await {
+            // Presets are optional in ONVIF: a camera that has none answers
+            // ter:NotImplemented (Imou Cruiser SE+ 2MP, e.g.): there are none.
+            Err(OnvifError::NotImplemented) => Ok(Vec::new()),
+            other => other.map(|body| presets_of(&body)),
+        }
     }
 
     /// Goes to the preset `token`.
@@ -217,9 +220,9 @@ mod tests {
         )
     }
 
-    /// A fake PTZ camera (`ptz`: whether it announces the service); the
-    /// bodies it received.
-    async fn camera(ptz: bool) -> (String, Arc<Mutex<Vec<String>>>) {
+    /// A fake PTZ camera (`ptz`: whether it announces the service, `presets`:
+    /// whether it implements `GetPresets`); the bodies it received.
+    async fn camera(ptz: bool, presets: bool) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -280,9 +283,16 @@ mod tests {
                             "<trt:GetProfilesResponse><trt:Profiles token=\"Sub\"><tt:Name>Sub</tt:Name></trt:Profiles><trt:Profiles token=\"Main&amp;1\"><tt:Name>Main</tt:Name><tt:PTZConfiguration token=\"PtzConf\"><tt:Name>ptz</tt:Name></tt:PTZConfiguration></trt:Profiles></trt:GetProfilesResponse>",
                         )
                     } else if text.contains("GetPresets") {
-                        soap(
-                            "<tptz:GetPresetsResponse><tptz:Preset token=\"1\"><tt:Name>Portail</tt:Name></tptz:Preset><tptz:Preset token=\"2\"></tptz:Preset></tptz:GetPresetsResponse>",
-                        )
+                        if presets {
+                            soap(
+                                "<tptz:GetPresetsResponse><tptz:Preset token=\"1\"><tt:Name>Portail</tt:Name></tptz:Preset><tptz:Preset token=\"2\"></tptz:Preset></tptz:GetPresetsResponse>",
+                            )
+                        } else {
+                            // Imou Cruiser SE+ 2MP: presets are not implemented.
+                            soap(
+                                "<env:Fault><env:Code><env:Value>env:Sender</env:Value><env:Subcode><env:Value>ter:NotImplemented</env:Value></env:Subcode></env:Code><env:Reason><env:Text>This optional method is not implemented</env:Text></env:Reason></env:Fault>",
+                            )
+                        }
                     } else if text.contains("SetPreset") {
                         soap(
                             "<tptz:SetPresetResponse><tptz:PresetToken>3</tptz:PresetToken></tptz:SetPresetResponse>",
@@ -308,7 +318,7 @@ mod tests {
 
     #[tokio::test]
     async fn moves_the_camera_and_uses_its_presets() {
-        let (url, seen) = camera(true).await;
+        let (url, seen) = camera(true, true).await;
         let cam = PtzCamera::connect(&url, admin(), Duration::from_secs(5))
             .await
             .expect("ptz");
@@ -388,12 +398,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_camera_without_ptz_or_with_other_credentials_is_refused() {
-        let (url, _) = camera(false).await;
+        let (url, _) = camera(false, true).await;
         assert!(matches!(
             PtzCamera::connect(&url, admin(), Duration::from_secs(5)).await,
             Err(OnvifError::NoPtz)
         ));
-        let (url, _) = camera(true).await;
+        let (url, _) = camera(true, true).await;
         let other = Some(("other".to_owned(), Secret::new("x".to_owned())));
         assert!(matches!(
             PtzCamera::connect(&url, other, Duration::from_secs(5)).await,
@@ -401,5 +411,14 @@ mod tests {
         ));
         assert_eq!(speed(f32::NAN), "0.000");
         assert_eq!(duration(Duration::from_millis(300)), "PT1S");
+    }
+
+    #[tokio::test]
+    async fn a_camera_without_presets_has_none() {
+        let (url, _) = camera(true, false).await;
+        let cam = PtzCamera::connect(&url, admin(), Duration::from_secs(5))
+            .await
+            .expect("ptz");
+        assert!(cam.presets().await.expect("no presets").is_empty());
     }
 }

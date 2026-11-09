@@ -28,6 +28,10 @@ pub enum OnvifError {
     /// PTZ configuration).
     #[error("la caméra n'annonce pas de commande PTZ en ONVIF")]
     NoPtz,
+    /// ONVIF answers, but does not implement this optional method (a camera
+    /// with no presets, for instance).
+    #[error("la caméra n'implémente pas cette méthode ONVIF optionnelle")]
+    NotImplemented,
     /// Anything else.
     #[error("{0}")]
     Other(String),
@@ -185,8 +189,13 @@ impl Client {
             let refused = codes.contains("NotAuthorized")
                 || codes.contains("FailedAuthentication")
                 || reason.to_ascii_lowercase().contains("auth");
+            let missing = codes.contains("NotImplemented")
+                || codes.contains("NotSupported")
+                || reason.to_ascii_lowercase().contains("not implemented");
             return Err(if refused {
                 OnvifError::Unauthorized
+            } else if missing {
+                OnvifError::NotImplemented
             } else {
                 OnvifError::Other(format!(
                     "la caméra répond une erreur ONVIF : {}",
